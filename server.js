@@ -9,13 +9,11 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "*";
-app.use(
-  cors({
-    origin: FRONTEND_ORIGIN,
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type"]
-  })
-);
+app.use(cors({
+  origin: FRONTEND_ORIGIN,
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
+}));
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -29,9 +27,14 @@ Use simple language, correct science, and Zimbabwean/local examples when helpful
 Format clearly with headings and bullet points.
 Always be safe (lab safety, no dangerous instructions).
 `;
-  if (mode === "Quiz") return base + `Generate 10 questions + answers + short marking guide.`;
-  if (mode === "Practical") return base + `Write: Aim, Apparatus, Method, Observations, Conclusion, Safety, Common mistakes.`;
-  return base + `Explain with: definition, key points, local examples, then 3 quick check Q&As.`;
+
+  if (mode === "Quiz") {
+    return base + `Create 10 questions with answers + a short marking guide.`;
+  }
+  if (mode === "Practical") {
+    return base + `Write: Aim, Apparatus, Method, Observations/Results, Conclusion, Safety, Common mistakes.`;
+  }
+  return base + `Explain with: definition, key points, 2–3 local examples, then 3 quick check Q&As with answers.`;
 }
 
 app.post("/api/tutor", async (req, res) => {
@@ -39,7 +42,7 @@ app.post("/api/tutor", async (req, res) => {
     const { mode = "Explain", form = "Form 1", topic = "General", question = "" } = req.body || {};
     if (!question.trim()) return res.status(400).json({ error: "Please type a question." });
 
-    const model = process.env.OPENAI_MODEL || "gpt-5";
+    const model = process.env.OPENAI_MODEL || "gpt-4.1-mini"; // change to gpt-5 if you have it
     const instructions = buildInstructions(mode);
     const input = `Form: ${form}\nTopic: ${topic}\nUser question: ${question}`;
 
