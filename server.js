@@ -1,47 +1,40 @@
-/**
- * Sci-Guru Backend (Render) — server.js
- * - POST /api/chat  (main)
- * - GET  /api/health
- * - CORS enabled for GitHub Pages
- */
+// server.js
+require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config();
-
 const OpenAI = require("openai");
 
 const app = express();
 
-// ---------- CONFIG ----------
+// ---------- Config ----------
 const PORT = process.env.PORT || 3000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Set this on Render as: https://YOURNAME.github.io,https://YOURNAME.github.io/REPO
-// If you leave it blank, it will allow all origins (ok for testing).
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+// ✅ Put your real GitHub Pages URL here (recommended)
+// Example: https://scim...github.io/sci-guru-Frontend
+const ALLOWED_ORIGINS = [
+  process.env.FRONTEND_ORIGIN,     // optional: set in Render env
+  "http://localhost:5500",
+  "http://127.0.0.1:5500",
+  "http://localhost:5173",
+  "http://localhost:3000",
+].filter(Boolean);
 
-const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-
-// ---------- MIDDLEWARE ----------
-app.use(express.json({ limit: "2mb" }));
+// ---------- Middleware ----------
+app.use(express.json({ limit: "1mb" }));
 
 app.use(
   cors({
     origin: function (origin, cb) {
-      // Allow requests with no origin (Postman/curl/Render health checks)
+      // allow server-to-server, curl, Postman (no origin)
       if (!origin) return cb(null, true);
 
-      // If no whitelist configured, allow all (best for quick debugging)
+      // If you didn't set FRONTEND_ORIGIN yet, allow all temporarily:
       if (ALLOWED_ORIGINS.length === 0) return cb(null, true);
 
-      // Otherwise allow only whitelisted origins
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-
       return cb(new Error("CORS blocked: " + origin), false);
     },
     methods: ["GET", "POST", "OPTIONS"],
@@ -49,105 +42,90 @@ app.use(
   })
 );
 
-// (Optional) If some browsers send OPTIONS preflight, this helps:
 app.options("*", cors());
 
-// ---------- ROUTES ----------
+// ---------- Routes ----------
 app.get("/", (req, res) => {
-  res.status(200).send("Sci-Guru backend is running ✅");
+  res.send("Sci-Guru Backend is running ✅");
 });
 
 app.get("/api/health", (req, res) => {
-  res.json({
-    ok: true,
-    status: "online",
-    model: OPENAI_MODEL,
-    time: new Date().toISOString(),
-  });
+  res.json({ ok: true, status: "healthy" });
 });
 
-// Build instructions depending on action/mode
-function buildInstructions(mode = "Notes", action = "") {
-  const base = `
-You are Sci-Guru, a Zimbabwe ZIMSEC / Heritage-Based Combined Science tutor.
-Be clear, step-by-step, and age-appropriate.
-Use Zimbabwean examples when helpful (maize meal, borehole water, Sadza, grinding stone/imbokodo, etc.).
-If the user asks for a practical, include: Aim, Apparatus, Chemicals (if any), Method, Results table, Safety, Conclusion.
-Keep answers structured with headings and bullet points.
-`;
+function buildInstructions(actionOrMode = "chat") {
+  const a = String(actionOrMode || "").toLowerCase();
 
-  if (action === "quiz") {
-    return base + `
-Generate a quiz that matches the selected form/topic.
-Prefer multiple-choice (A–D). Provide answers at the end.`;
+  // Keep answers aligned to Zimbabwe/ZIMSEC style and the student's level.
+  const base =
+    "You are Sci-Guru, a friendly Zimbabwean Combined Science tutor aligned to ZIMSEC/Heritage-Based curriculum. " +
+    "Explain clearly, step-by-step, using local examples (maize meal, borehole water, imbokodo, cooking fire, etc). " +
+    "Keep it safe and school-appropriate. If asked for a practical, include safety precautions.";
+
+  if (a.includes("quiz")) {
+    return (
+      base +
+      "\nReturn a 10-question multiple-choice quiz (A–D). After the quiz, add an ANSWER KEY."
+    );
   }
-
-  if (action === "practical") {
-    return base + `
-Generate a safe school practical experiment with the standard sections (Aim, Apparatus, Method, etc.).
-Use local low-cost materials where possible.`;
+  if (a.includes("practical")) {
+    return (
+      base +
+      "\nReturn a school practical with: Aim, Apparatus, Chemicals (if any), Method, Results table, Safety, Conclusion."
+    );
   }
-
-  if (action === "explain") {
-    return base + `
-Explain simply, like a teacher, then give 3 quick check questions at the end.`;
+  if (a.includes("explain")) {
+    return base + "\nReturn a clear explanation with examples and a short summary at the end.";
   }
-
-  // Default chat/notes
-  return base + `
-Mode is "${mode}". Respond appropriately for that mode.`;
+  // default chat
+  return base;
 }
 
-// MAIN CHAT ROUTE (matches your tutor.html)
+// ✅ Main AI route
 app.post("/api/chat", async (req, res) => {
   try {
-    if (!OPENAI_API_KEY) {
-      return res.status(500).json({
-        error: "Missing OPENAI_API_KEY on server environment variables.",
-      });
+    const {
+      mode = "Tutor",
+      form = "",
+      chapter = "",
+      topic = "General",
+      question = "",
+      message = "",
+      action = "chat",
+    } = req.body || {};
+
+    const userText = (question || message || "").trim();
+
+    if (!userText) {
+      return res.status(400).json({ text: "Please send a question/message." });
     }
 
-    const body = req.body || {};
-
-    // Support both frontend payload formats:
-    // - your tutor.html uses message
-    // - other tutor uses question
-    const mode = body.mode || "Tutor";
-    const action = body.action || ""; // explain | quiz | practical | chat
-    const topic = body.topic || "General";
-    const form = body.form || "";      // optional if you send it
-    const chapter = body.chapter || ""; // optional
-    const message = body.message || body.question || body.prompt || "";
-
-    if (!message.trim()) {
-      return res.status(400).json({ error: "No message/question provided." });
-    }
-
-    const instructions = buildInstructions(mode, action);
+    const instructions = buildInstructions(action || mode);
 
     const input = [
+      `Mode: ${mode}`,
       form ? `Form: ${form}` : null,
       chapter ? `Chapter: ${chapter}` : null,
       `Topic: ${topic}`,
-      `User request: ${message}`
-    ].filter(Boolean).join("\n");
+      `User request: ${userText}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     const completion = await client.chat.completions.create({
-      model: OPENAI_MODEL,
+      model: MODEL,
       messages: [
         { role: "system", content: instructions },
-        { role: "user", content: input }
+        { role: "user", content: input },
       ],
       temperature: 0.7,
     });
 
     const text =
-      completion?.choices?.[0]?.message?.content ||
+      completion?.choices?.[0]?.message?.content?.trim() ||
       "No output returned.";
 
-    // Return BOTH keys so any frontend works:
-    res.json({ text, reply: text });
-
+    res.json({ text });
   } catch (err) {
     console.error("OpenAI Error:", err);
     res.status(500).json({
@@ -157,17 +135,6 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// OPTIONAL ALIASES (your tutor tries multiple endpoints)
-app.post("/chat", (req, res) => app._router.handle(req, res, () => {}));
-app.post("/api/ask", (req, res) => app._router.handle(req, res, () => {}));
-app.post("/ask", (req, res) => app._router.handle(req, res, () => {}));
-
-// Better alias handling (maps to /api/chat)
-app.post("/chat", (req, res) => { req.url = "/api/chat"; app.handle(req, res); });
-app.post("/api/ask", (req, res) => { req.url = "/api/chat"; app.handle(req, res); });
-app.post("/ask", (req, res) => { req.url = "/api/chat"; app.handle(req, res); });
-
-// ---------- START ----------
 app.listen(PORT, () => {
-  console.log(`✅ Sci-Guru backend listening on port ${PORT}`);
+  console.log(`Sci-Guru backend listening on port ${PORT}`);
 });
