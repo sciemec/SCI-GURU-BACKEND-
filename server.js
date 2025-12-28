@@ -1,9 +1,8 @@
-// server.js
 require("dotenv").config();
-
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
+const axios = require("axios"); // Added for the self-ping wake-up feature
 
 const app = express();
 
@@ -12,14 +11,12 @@ const PORT = process.env.PORT || 3000;
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ✅ FIXED: Added your GitHub Pages URL to the whitelist
+// ✅ Whitelist for GitHub Pages and Local Development
 const ALLOWED_ORIGINS = [
-  process.env.FRONTEND_ORIGIN, // optional: set in Render env
-  "https://sciemec.github.io",  // Your live frontend
+  process.env.FRONTEND_ORIGIN, 
+  "https://sciemec.github.io", 
   "http://localhost:5500",
   "http://127.0.0.1:5500",
-  "http://localhost:5173",
-  "http://localhost:3000",
 ].filter(Boolean);
 
 // ---------- Middleware ----------
@@ -28,17 +25,11 @@ app.use(express.json({ limit: "1mb" }));
 app.use(
   cors({
     origin: function (origin, cb) {
-      // 1. Allow server-to-server, curl, Postman (no origin)
-      if (!origin) return cb(null, true);
-
-      // 2. Check if the origin is in our allowed list
-      if (ALLOWED_ORIGINS.includes(origin)) {
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
         return cb(null, true);
-      } else {
-        // 3. If not found, log it and block
-        console.error("CORS Blocked Origin:", origin);
-        return cb(new Error("CORS blocked: " + origin), false);
       }
+      console.error("CORS Blocked Origin:", origin);
+      return cb(new Error("CORS blocked: " + origin), false);
     },
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -47,43 +38,52 @@ app.use(
 
 app.options("*", cors());
 
+// ---------- Self-Ping Logic (Prevent Render Sleep) ----------
+// This pings your health route every 14 minutes to keep the server awake.
+const BACKEND_URL = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}.onrender.com/api/health`;
+
+setInterval(async () => {
+  try {
+    if (process.env.RENDER_EXTERNAL_HOSTNAME) {
+      await axios.get(BACKEND_URL);
+      console.log("Self-ping successful: Server is staying awake.");
+    }
+  } catch (err) {
+    console.error("Self-ping failed:", err.message);
+  }
+}, 840000); // 14 minutes
+
 // ---------- Routes ----------
 app.get("/", (req, res) => {
   res.send("Sci-Guru Backend is running ✅");
 });
 
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, status: "healthy" });
+  res.json({ ok: true, status: "healthy", timestamp: new Date() });
 });
 
 function buildInstructions(actionOrMode = "chat") {
   const a = String(actionOrMode || "").toLowerCase();
 
-  const base =
-    "You are Sci-Guru, a friendly Zimbabwean Combined Science tutor aligned to ZIMSEC/Heritage-Based curriculum. " +
-    "Explain clearly, step-by-step, using local examples (maize meal, borehole water, imbokodo, cooking fire, etc). " +
-    "Keep it safe and school-appropriate. If asked for a practical, include safety precautions.";
+  const base = 
+    "You are Sci-Guru, a friendly Zimbabwean Combined Science tutor aligned to ZIMSEC/Heritage-Based curriculum (Forms 1–4). " +
+    "Explain concepts clearly using local examples (e.g., maize meal, borehole water, cooking fire, Eastern Highlands). " +
+    "Always use clear headings and bullet points. Do not reproduce copyrighted textbook questions exactly; create original 'exam-style' ones.";
 
   if (a.includes("quiz")) {
-    return (
-      base +
-      "\nReturn a 10-question multiple-choice quiz (A–D). After the quiz, add an ANSWER KEY."
-    );
+    return base + "\nGenerate a 10-question ZIMSEC-style Multiple Choice Quiz. Provide an ANSWER KEY at the very end.";
   }
   if (a.includes("practical")) {
-    return (
-      base +
-      "\nReturn a school practical with: Aim, Apparatus, Chemicals (if any), Method, Results table, Safety, Conclusion."
-    );
+    return base + "\nGenerate a school practical with: Aim, Apparatus, Method, Results/Observations, Conclusion, and a 'Chenjedzo/Safety' section.";
   }
-  if (a.includes("explain")) {
-    return base + "\nReturn a clear explanation with examples and a short summary at the end.";
+  if (a.includes("notes")) {
+    return base + "\nCreate structured study notes with key definitions, main points, and 2 quick-check questions.";
   }
   return base;
 }
 
-// ✅ Main AI route
-app.post("/api/chat", async (req, res) => {
+// ---------- Main AI Route ----------
+app.post("/api/chat", async (req, res, next) => { // added 'next' for error handling
   try {
     const {
       mode = "Tutor",
@@ -98,20 +98,17 @@ app.post("/api/chat", async (req, res) => {
     const userText = (question || message || "").trim();
 
     if (!userText) {
-      return res.status(400).json({ text: "Please send a question/message." });
+      return res.status(400).json({ text: "Please send a question or topic." });
     }
 
     const instructions = buildInstructions(action || mode);
-
     const input = [
       `Mode: ${mode}`,
       form ? `Form: ${form}` : null,
       chapter ? `Chapter: ${chapter}` : null,
       `Topic: ${topic}`,
       `User request: ${userText}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
+    ].filter(Boolean).join("\n");
 
     const completion = await client.chat.completions.create({
       model: MODEL,
@@ -122,18 +119,25 @@ app.post("/api/chat", async (req, res) => {
       temperature: 0.7,
     });
 
-    const text =
-      completion?.choices?.[0]?.message?.content?.trim() ||
-      "No output returned.";
-
-    res.json({ text });
+    res.json({ text: completion?.choices?.[0]?.message?.content?.trim() || "No output returned." });
   } catch (err) {
-    console.error("OpenAI Error:", err);
-    res.status(500).json({
-      error: "Server error calling OpenAI.",
-      detail: err?.message || String(err),
-    });
+    // Pass the error to the global error handler below
+    next(err);
   }
+});
+
+// ---------- Global Error Handler ----------
+// This catches any crash and sends a clean message to the student
+app.use((err, req, res, next) => {
+  console.error("🔥 SYSTEM ERROR:", err.stack);
+  
+  const status = err.status || 500;
+  res.status(status).json({
+    error: true,
+    message: "Sci-Guru backend error.",
+    suggestion: "Wait 60 seconds and try again (the server might be waking up).",
+    debug_detail: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
 });
 
 app.listen(PORT, () => {
