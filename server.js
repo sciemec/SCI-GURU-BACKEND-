@@ -12,10 +12,10 @@ const PORT = process.env.PORT || 3000;
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ✅ Put your real GitHub Pages URL here (recommended)
-// Example: https://scim...github.io/sci-guru-Frontend
+// ✅ FIXED: Added your GitHub Pages URL to the whitelist
 const ALLOWED_ORIGINS = [
-  process.env.FRONTEND_ORIGIN,     // optional: set in Render env
+  process.env.FRONTEND_ORIGIN, // optional: set in Render env
+  "https://sciemec.github.io",  // Your live frontend
   "http://localhost:5500",
   "http://127.0.0.1:5500",
   "http://localhost:5173",
@@ -28,14 +28,17 @@ app.use(express.json({ limit: "1mb" }));
 app.use(
   cors({
     origin: function (origin, cb) {
-      // allow server-to-server, curl, Postman (no origin)
+      // 1. Allow server-to-server, curl, Postman (no origin)
       if (!origin) return cb(null, true);
 
-      // If you didn't set FRONTEND_ORIGIN yet, allow all temporarily:
-      if (ALLOWED_ORIGINS.length === 0) return cb(null, true);
-
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked: " + origin), false);
+      // 2. Check if the origin is in our allowed list
+      if (ALLOWED_ORIGINS.includes(origin)) {
+        return cb(null, true);
+      } else {
+        // 3. If not found, log it and block
+        console.error("CORS Blocked Origin:", origin);
+        return cb(new Error("CORS blocked: " + origin), false);
+      }
     },
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -56,7 +59,6 @@ app.get("/api/health", (req, res) => {
 function buildInstructions(actionOrMode = "chat") {
   const a = String(actionOrMode || "").toLowerCase();
 
-  // Keep answers aligned to Zimbabwe/ZIMSEC style and the student's level.
   const base =
     "You are Sci-Guru, a friendly Zimbabwean Combined Science tutor aligned to ZIMSEC/Heritage-Based curriculum. " +
     "Explain clearly, step-by-step, using local examples (maize meal, borehole water, imbokodo, cooking fire, etc). " +
@@ -77,7 +79,6 @@ function buildInstructions(actionOrMode = "chat") {
   if (a.includes("explain")) {
     return base + "\nReturn a clear explanation with examples and a short summary at the end.";
   }
-  // default chat
   return base;
 }
 
