@@ -1,145 +1,85 @@
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const OpenAI = require("openai");
-const axios = require("axios"); // Added for the self-ping wake-up feature
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const { OpenAI } = require('openai');
 
 const app = express();
+app.use(cors());
+app.use(express.json());
 
-// ---------- Config ----------
-const PORT = process.env.PORT || 3000;
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ✅ Whitelist for GitHub Pages and Local Development
-const ALLOWED_ORIGINS = [
-  process.env.FRONTEND_ORIGIN, 
-  "https://sciemec.github.io", 
-  "http://localhost:5500",
-  "http://127.0.0.1:5500",
-].filter(Boolean);
+// --- 1. SYSTEM PROMPT LOGIC ---
+const BASE_INSTRUCTIONS = `You are Sci-Guru, a ZIMSEC Science Tutor in Zimbabwe. 
+Follow the Heritage-Based Curriculum. Use local examples (e.g., Kariba Dam for electricity, 
+Hwange for coal/energy, local plants like Aloe or Baobab for biology). 
+Always explain concepts simply for Form 1-4 students.`;
 
-// ---------- Middleware ----------
-app.use(express.json({ limit: "1mb" }));
+// --- 2. STUDENT ROUTE ---
+app.post('/api/chat', async (req, res) => {
+    try {
+        const { question, topic, form, action } = req.body;
+        
+        let userPrompt = `Student Question: ${question}. Topic: ${topic}. Level: ${form}.`;
+        if(action === 'practical') userPrompt += " Provide a step-by-step practical experiment a student can do.";
 
-app.use(
-  cors({
-    origin: function (origin, cb) {
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-        return cb(null, true);
-      }
-      console.error("CORS Blocked Origin:", origin);
-      return cb(new Error("CORS blocked: " + origin), false);
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+        const completion = await openai.chat.completions.create({
+            model: "gpt-3.5-turbo",
+            messages: [
+                { role: "system", content: BASE_INSTRUCTIONS },
+                { role: "user", content: userPrompt }
+            ]
+        });
 
-app.options("*", cors());
-
-// ---------- Self-Ping Logic (Prevent Render Sleep) ----------
-// This pings your health route every 14 minutes to keep the server awake.
-const BACKEND_URL = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}.onrender.com/api/health`;
-
-setInterval(async () => {
-  try {
-    if (process.env.RENDER_EXTERNAL_HOSTNAME) {
-      await axios.get(BACKEND_URL);
-      console.log("Self-ping successful: Server is staying awake.");
+        res.json({ text: completion.choices[0].message.content });
+    } catch (error) {
+        res.status(500).json({ error: "AI Engine Error" });
     }
-  } catch (err) {
-    console.error("Self-ping failed:", err.message);
-  }
-}, 840000); // 14 minutes
-
-// ---------- Routes ----------
-app.get("/", (req, res) => {
-  res.send("Sci-Guru Backend is running ✅");
 });
 
-app.get("/api/health", (req, res) => {
-  res.json({ ok: true, status: "healthy", timestamp: new Date() });
-});
+// --- 3. TEACHER PORTAL ROUTE ---
+app.post('/api/teacher-tools', async (req, res) => {
+    try {
+        const { type, topic, form } = req.body;
+        
+        let teacherSystemPrompt = "You are a ZIMSEC Head of Science Department. Provide professional, printable documents.";
+        let teacherUserPrompt = "";
 
-function buildInstructions(actionOrMode = "chat") {
-  const a = String(actionOrMode || "").toLowerCase();
+        if (type === 'scheme_of_work') {
+            teacherUserPrompt = `Create a 4-week Scheme of Work table for ${topic} (${form}). 
+            Include columns for Week, Topic, Objectives, Competencies, and Suggested Media/Activities.`;
+        } else if (type === 'lesson_plan') {
+            teacherUserPrompt = `Create a detailed 40-minute lesson plan for ${topic}. Include Objectives, Introduction, Body, and Evaluation.`;
+        } else {
+            teacherUserPrompt = `Generate a ZIMSEC Paper 1 style quiz for ${topic}.`;
+        }
 
-  const base = 
-    "You are Sci-Guru, a friendly Zimbabwean Combined Science tutor aligned to ZIMSEC/Heritage-Based curriculum (Forms 1–4). " +
-    "Explain concepts clearly using local examples (e.g., maize meal, borehole water, cooking fire, Eastern Highlands). " +
-    "Always use clear headings and bullet points. Do not reproduce copyrighted textbook questions exactly; create original 'exam-style' ones.";
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4", // Teachers get the smarter model for better documents
+            messages: [
+                { role: "system", content: teacherSystemPrompt },
+                { role: "user", content: teacherUserPrompt }
+            ]
+        });
 
-  if (a.includes("quiz")) {
-    return base + "\nGenerate a 10-question ZIMSEC-style Multiple Choice Quiz. Provide an ANSWER KEY at the very end.";
-  }
-  if (a.includes("practical")) {
-    return base + "\nGenerate a school practical with: Aim, Apparatus, Method, Results/Observations, Conclusion, and a 'Chenjedzo/Safety' section.";
-  }
-  if (a.includes("notes")) {
-    return base + "\nCreate structured study notes with key definitions, main points, and 2 quick-check questions.";
-  }
-  return base;
-}
-
-// ---------- Main AI Route ----------
-app.post("/api/chat", async (req, res, next) => { // added 'next' for error handling
-  try {
-    const {
-      mode = "Tutor",
-      form = "",
-      chapter = "",
-      topic = "General",
-      question = "",
-      message = "",
-      action = "chat",
-    } = req.body || {};
-
-    const userText = (question || message || "").trim();
-
-    if (!userText) {
-      return res.status(400).json({ text: "Please send a question or topic." });
+        res.json({ text: completion.choices[0].message.content });
+    } catch (error) {
+        res.status(500).json({ error: "Teacher Portal Error" });
     }
-
-    const instructions = buildInstructions(action || mode);
-    const input = [
-      `Mode: ${mode}`,
-      form ? `Form: ${form}` : null,
-      chapter ? `Chapter: ${chapter}` : null,
-      `Topic: ${topic}`,
-      `User request: ${userText}`,
-    ].filter(Boolean).join("\n");
-
-    const completion = await client.chat.completions.create({
-      model: MODEL,
-      messages: [
-        { role: "system", content: instructions },
-        { role: "user", content: input },
-      ],
-      temperature: 0.7,
-    });
-
-    res.json({ text: completion?.choices?.[0]?.message?.content?.trim() || "No output returned." });
-  } catch (err) {
-    // Pass the error to the global error handler below
-    next(err);
-  }
 });
 
-// ---------- Global Error Handler ----------
-// This catches any crash and sends a clean message to the student
-app.use((err, req, res, next) => {
-  console.error("🔥 SYSTEM ERROR:", err.stack);
-  
-  const status = err.status || 500;
-  res.status(status).json({
-    error: true,
-    message: "Sci-Guru backend error.",
-    suggestion: "Wait 60 seconds and try again (the server might be waking up).",
-    debug_detail: process.env.NODE_ENV === 'development' ? err.message : undefined
-  });
+// --- 4. HEALTH CHECK & AUTO-WAKE ---
+app.get('/api/health', (req, res) => {
+    res.status(200).send("Sci-Guru is Awake");
 });
 
-app.listen(PORT, () => {
-  console.log(`Sci-Guru backend listening on port ${PORT}`);
-});
+// Self-ping every 10 minutes to stay alive on Render Free Tier
+setInterval(() => {
+    axios.get('https://sci-guru-backend.onrender.com/api/health')
+        .then(() => console.log('Self-ping success'))
+        .catch(err => console.log('Self-ping failed'));
+}, 600000); 
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
