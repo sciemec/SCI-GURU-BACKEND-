@@ -11,7 +11,7 @@ const axios = require('axios');
 const app = express();
 
 // --- 1. CONFIG & SECURITY ---
-const allowedOrigins = ['https://sciemec.github.io', 'http://localhost:5500', 'http://localhost:3000'];
+const allowedOrigins = ['https://sci-guru-ai', 'www.sci-guru-ai.com', 'http://sci-guru-49796.web.app',http://localhost:500'];
 app.use(cors({
     origin: (origin, callback) => {
         if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
@@ -171,3 +171,4 @@ const PORT_FINAL = process.env.PORT || 3000;
 app.listen(PORT_FINAL, () => {
     console.log(`✅ Sci-Guru Ultimate Server running on port ${PORT_FINAL}`);
 });
+
