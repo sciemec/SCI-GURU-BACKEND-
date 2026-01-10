@@ -6,38 +6,46 @@ const cors = require("cors");
 const OpenAI = require("openai");
 const admin = require('firebase-admin');
 const { Paynow } = require('paynow');
-const axios = require('axios');
 
 const app = express();
 
 // --- 1. CONFIG & SECURITY ---
-const allowedOrigins = ['https://sci-guru-ai', 'www.sci-guru-ai.com', 'http://sci-guru-49796.web.app',http://localhost:500'];
+// Fixed the syntax errors and added your official domain
+const allowedOrigins = [
+    'https://sci-guru-ai.com', 
+    'https://www.sci-guru-ai.com', 
+    'https://sci-guru-49796.web.app', 
+    'https://sci-guru-49796.firebaseapp.com',
+    'http://localhost:5000'
+];
+
 app.use(cors({
     origin: (origin, callback) => {
         if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
         callback(new Error('CORS blocked by Sci-Guru Security'));
     }
 }));
-app.use(express.json({ limit: "25mb" })); // High limit for Vision homework photos
+
+app.use(express.json({ limit: "25mb" })); 
 
 // Paths & Models for RAG
 const VEC_PATH = path.resolve(process.cwd(), "docs/zimsec_vectors.json");
-const CHAT_MODEL = process.env.OPENAI_MODEL || "gpt-4o"; // Using 4o for Vision + RAG
+const CHAT_MODEL = process.env.OPENAI_MODEL || "gpt-4o"; 
 const EMBED_MODEL = process.env.OPENAI_EMBED_MODEL || "text-embedding-3-small";
 
 // --- 2. INITIALIZE SERVICES ---
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Firebase (Nudges & Auth)
+// Firebase Admin
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-// Paynow (EcoCash)
+// Paynow
 const paynow = new Paynow(process.env.PAYNOW_ID, process.env.PAYNOW_KEY);
 paynow.resultUrl = "https://sci-guru-backend.onrender.com/api/payment-update";
 
-// --- 3. HELPER FUNCTIONS (RAG Logic) ---
+// --- 3. HELPER FUNCTIONS ---
 function cosineSimilarity(a, b) {
     let dot = 0, na = 0, nb = 0;
     for (let i = 0; i < a.length; i++) {
@@ -59,13 +67,12 @@ function loadVectors() {
 app.get("/health", (req, res) => {
     res.json({ 
         ok: true, 
-        model: CHAT_MODEL, 
-        vectors_loaded: fs.existsSync(VEC_PATH),
-        zimsec_status: "Active 🇿🇼" 
+        zimsec_status: "Active 🇿🇼",
+        vectors_loaded: fs.existsSync(VEC_PATH)
     });
 });
 
-// A. MASTER CHAT (RAG + Student Memory)
+// A. MASTER CHAT (RAG Logic)
 app.post("/chat", async (req, res) => {
     try {
         const message = (req.body?.message || "").toString().trim();
@@ -77,11 +84,9 @@ app.post("/chat", async (req, res) => {
         let topChunks = [];
 
         if (store) {
-            // Embed question for Vector Search
             const qEmbed = await openai.embeddings.create({ model: EMBED_MODEL, input: message });
             const qVec = qEmbed.data[0].embedding;
 
-            // Rank chunks from PDF
             const scored = store.chunks.map(c => ({
                 id: c.id, text: c.text, score: cosineSimilarity(qVec, c.embedding)
             })).sort((a, b) => b.score - a.score);
@@ -93,14 +98,12 @@ app.post("/chat", async (req, res) => {
         const system = `You are Sci-Guru, a Zimbabwe ZIMSEC Combined Science tutor. 
         Use the ZIMSEC CONTEXT provided to answer. If context is missing, use local Zimbabwean Heritage examples.`;
 
-        const userPrompt = `ZIMSEC CONTEXT:\n${context}\n\nQUESTION:\n${message}`;
-
         const completion = await openai.chat.completions.create({
             model: CHAT_MODEL,
             messages: [
                 { role: "system", content: system },
                 ...history,
-                { role: "user", content: userPrompt }
+                { role: "user", content: `ZIMSEC CONTEXT:\n${context}\n\nQUESTION:\n${message}` }
             ],
             temperature: 0.3
         });
@@ -114,7 +117,7 @@ app.post("/chat", async (req, res) => {
     }
 });
 
-// B. TEACHER VISION MARKER (Nano Banana)
+// B. VISION MARKER
 app.post('/api/grade-image', async (req, res) => {
     try {
         const { imageBase64, markingScheme, topic } = req.body;
@@ -124,7 +127,7 @@ app.post('/api/grade-image', async (req, res) => {
                 {
                     role: "user",
                     content: [
-                        { type: "text", text: `ZIMSEC Examiner Mode: Mark this handwritten student script for ${topic} using this scheme: ${markingScheme}. Score /10.` },
+                        { type: "text", text: `ZIMSEC Examiner Mode: Mark this handwritten student script for ${topic || 'Science'} using this scheme: ${markingScheme || 'Standard ZIMSEC marks'}. Score /10.` },
                         { type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageBase64}` } }
                     ],
                 },
@@ -145,7 +148,7 @@ app.post('/api/pay', async (req, res) => {
     try {
         const response = await paynow.sendMobile(payment, phone, "ecocash");
         if (response.success) {
-            await db.collection('payments').add({ phone, amount, status: 'pending', date: new Date() });
+            await db.collection('payments').add({ phone, amount, status: 'pending', date: new Date(), pollUrl: response.pollUrl });
             res.json({ pollUrl: response.pollUrl, instructions: response.instructions });
         } else {
             res.status(400).json({ error: "EcoCash failed" });
@@ -155,20 +158,8 @@ app.post('/api/pay', async (req, res) => {
     }
 });
 
-// D. PROACTIVE NUDGES (FCM)
-app.post('/api/send-nudge', async (req, res) => {
-    const { token, title, body } = req.body;
-    try {
-        await admin.messaging().send({ notification: { title, body }, token });
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: "Nudge failed" });
-    }
-});
-
 // --- 5. START ---
-const PORT_FINAL = process.env.PORT || 3000;
-app.listen(PORT_FINAL, () => {
-    console.log(`✅ Sci-Guru Ultimate Server running on port ${PORT_FINAL}`);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`✅ Sci-Guru Ultimate Server running on port ${PORT}`);
 });
-
