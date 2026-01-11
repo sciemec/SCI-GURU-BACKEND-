@@ -1,0 +1,25 @@
+{
+  "vectorStoreId": "vs_69566a68ad3c8191aab77cd248c9d5ff",
+  "files": {
+    "form1.pdf": {
+      "sig": "16863770-1763639808093.0698",
+      "file_id": "file-Npg8ZEKrYW7LtqomUFsMQu"
+    },
+    "form2.pdf": {
+      "sig": "50377152-1763639781866.882",
+      "file_id": "file-DqwcAx9WjsiHK1Cvz2uE8r"
+    },
+    "form3.pdf": {
+      "sig": "42993680-1763593895504.8315",
+      "file_id": "file-U1zZhbVNZqBeKtpxuJXt31"
+    },
+    "form4.pdf": {
+      "sig": "44050479-1763641044063.8994",
+      "file_id": "file-MYkLJhtWXzCXGtZDJNV9vb"
+    },
+    "syllabus.pdf": {
+      "sig": "810714-1767262478617.6992",
+      "file_id": "file-VfSoJvFeh4ebuwRoaKKcSW"
+    }
+  }
+}
