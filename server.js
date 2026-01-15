@@ -1,165 +1,77 @@
-require("dotenv").config();
-const fs = require("fs");
-const path = require("path");
-const express = require("express");
-const cors = require("cors");
-const OpenAI = require("openai");
-const admin = require('firebase-admin');
-const { Paynow } = require('paynow');
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai");
+const { FaissStore } = require("@langchain/community/vectorstores/faiss");
 
 const app = express();
+const PORT = 3001;
 
-// --- 1. CONFIG & SECURITY ---
-// Fixed the syntax errors and added your official domain
-const allowedOrigins = [
-    'https://sci-guru-ai.com', 
-    'https://www.sci-guru-ai.com', 
-    'https://sci-guru-49796.web.app', 
-    'https://sci-guru-49796.firebaseapp.com',
-    'http://localhost:5000'
-];
+// 1. MIDDLEWARE
+app.use(cors()); // Allows your frontend to talk to this backend
+app.use(express.json());
 
-app.use(cors({
-    origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-        callback(new Error('CORS blocked by Sci-Guru Security'));
-    }
-}));
+// 2. CONFIGURATION
+const GOOGLE_API_KEY = "YOUR_GEMINI_API_KEY_HERE"; // Paste your Gemini key here
 
-app.use(express.json({ limit: "25mb" })); 
-
-// Paths & Models for RAG
-const VEC_PATH = path.resolve(process.cwd(), "docs/zimsec_vectors.json");
-const CHAT_MODEL = process.env.OPENAI_MODEL || "gpt-4o"; 
-const EMBED_MODEL = process.env.OPENAI_EMBED_MODEL || "text-embedding-3-small";
-
-// --- 2. INITIALIZE SERVICES ---
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// Firebase Admin
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-const db = admin.firestore();
-
-// Paynow
-const paynow = new Paynow(process.env.PAYNOW_ID, process.env.PAYNOW_KEY);
-paynow.resultUrl = "https://sci-guru-backend.onrender.com/api/payment-update";
-
-// --- 3. HELPER FUNCTIONS ---
-function cosineSimilarity(a, b) {
-    let dot = 0, na = 0, nb = 0;
-    for (let i = 0; i < a.length; i++) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
-}
-
-function loadVectors() {
-    if (!fs.existsSync(VEC_PATH)) return null;
-    return JSON.parse(fs.readFileSync(VEC_PATH, "utf8"));
-}
-
-// --- 4. ROUTES ---
-
-// Health Check
-app.get("/health", (req, res) => {
-    res.json({ 
-        ok: true, 
-        zimsec_status: "Active 🇿🇼",
-        vectors_loaded: fs.existsSync(VEC_PATH)
-    });
+// 3. INITIALIZE AI MODELS
+const embeddings = new GoogleGenerativeAIEmbeddings({
+    apiKey: GOOGLE_API_KEY,
+    modelName: "models/text-embedding-004", // Must match your index_books.py!
 });
 
-// A. MASTER CHAT (RAG Logic)
-app.post("/chat", async (req, res) => {
+const model = new ChatGoogleGenerativeAI({
+    apiKey: GOOGLE_API_KEY,
+    modelName: "gemini-1.5-flash",
+    temperature: 0.3, // Lower temperature makes the tutor more factual
+});
+
+// 4. THE CHAT ROUTE
+app.post('/api/chat', async (req, res) => {
     try {
-        const message = (req.body?.message || "").toString().trim();
-        const history = req.body?.history || [];
-        if (!message) return res.status(400).json({ error: "message is required" });
+        const { question } = req.body;
 
-        const store = loadVectors();
-        let context = "No specific ZIMSEC context found.";
-        let topChunks = [];
-
-        if (store) {
-            const qEmbed = await openai.embeddings.create({ model: EMBED_MODEL, input: message });
-            const qVec = qEmbed.data[0].embedding;
-
-            const scored = store.chunks.map(c => ({
-                id: c.id, text: c.text, score: cosineSimilarity(qVec, c.embedding)
-            })).sort((a, b) => b.score - a.score);
-
-            topChunks = scored.slice(0, 5);
-            context = topChunks.map((t, i) => `(${i + 1}) ${t.text}`).join("\n\n");
+        if (!question) {
+            return res.status(400).json({ error: "No question provided" });
         }
 
-        const system = `You are Sci-Guru, a Zimbabwe ZIMSEC Combined Science tutor. 
-        Use the ZIMSEC CONTEXT provided to answer. If context is missing, use local Zimbabwean Heritage examples.`;
+        // A. LOAD YOUR FAISS INDEX
+        // This folder was created by your index_books.py script
+        const indexDirectory = path.join(__dirname, "faiss_index");
+        const vectorStore = await FaissStore.load(indexDirectory, embeddings);
 
-        const completion = await openai.chat.completions.create({
-            model: CHAT_MODEL,
-            messages: [
-                { role: "system", content: system },
-                ...history,
-                { role: "user", content: `ZIMSEC CONTEXT:\n${context}\n\nQUESTION:\n${message}` }
-            ],
-            temperature: 0.3
+        // B. SEARCH THE BOOKS FOR RELEVANT CONTEXT
+        const searchResults = await vectorStore.similaritySearch(question, 4);
+        const contextText = searchResults.map(doc => doc.pageContent).join("\n\n");
+
+        // C. CREATE THE TUTOR PROMPT
+        const prompt = `
+        You are a helpful and expert Heritage Science Tutor. 
+        Use the following excerpts from the science books to answer the student's question.
+        If the answer is not in the text, say you don't know rather than making it up.
+
+        RELEVANT EXCERPTS:
+        ${contextText}
+
+        STUDENT QUESTION:
+        ${question}
+        `;
+
+        // D. GET RESPONSE FROM GEMINI
+        const result = await model.invoke(prompt);
+        
+        res.json({ 
+            answer: result.content,
+            sources: searchResults.map(doc => doc.metadata.source || "Unknown Book")
         });
 
-        res.json({
-            answer: completion.choices[0].message.content,
-            sources: topChunks.map(t => ({ chunk: t.id, score: Number(t.score.toFixed(4)) }))
-        });
-    } catch (err) {
-        res.status(500).json({ error: "Server error", details: err.message });
+    } catch (error) {
+        console.error("Error in Chat API:", error);
+        res.status(500).json({ error: "The tutor is a bit confused. Please check your API key or index." });
     }
 });
 
-// B. VISION MARKER
-app.post('/api/grade-image', async (req, res) => {
-    try {
-        const { imageBase64, markingScheme, topic } = req.body;
-        const response = await openai.chat.completions.create({
-            model: "gpt-4o",
-            messages: [
-                {
-                    role: "user",
-                    content: [
-                        { type: "text", text: `ZIMSEC Examiner Mode: Mark this handwritten student script for ${topic || 'Science'} using this scheme: ${markingScheme || 'Standard ZIMSEC marks'}. Score /10.` },
-                        { type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageBase64}` } }
-                    ],
-                },
-            ],
-        });
-        res.json({ feedback: response.choices[0].message.content });
-    } catch (err) {
-        res.status(500).json({ error: "Vision mark failed" });
-    }
-});
-
-// C. PAYMENTS (Paynow EcoCash)
-app.post('/api/pay', async (req, res) => {
-    const { phone, amount, email } = req.body;
-    let payment = paynow.createPayment(`INV-${Date.now()}`, email);
-    payment.add("Sci-Guru Pro Subscription", amount);
-
-    try {
-        const response = await paynow.sendMobile(payment, phone, "ecocash");
-        if (response.success) {
-            await db.collection('payments').add({ phone, amount, status: 'pending', date: new Date(), pollUrl: response.pollUrl });
-            res.json({ pollUrl: response.pollUrl, instructions: response.instructions });
-        } else {
-            res.status(400).json({ error: "EcoCash failed" });
-        }
-    } catch (err) {
-        res.status(500).json({ error: "Payment gateway error" });
-    }
-});
-
-// --- 5. START ---
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`✅ Sci-Guru Ultimate Server running on port ${PORT}`);
+    console.log(`🚀 Heritage Science Tutor Backend running at http://localhost:${PORT}`);
+    console.log(`📂 Looking for index at: ${path.join(__dirname, "faiss_index")}`);
 });
